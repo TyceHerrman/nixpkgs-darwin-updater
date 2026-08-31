@@ -1,0 +1,74 @@
+name: self-update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 3 * * *"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: self-update-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the fork-scoped self-update token
+        env:
+          GH_SELF_UPDATE_TOKEN: ${{ secrets.GH_SELF_UPDATE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if test -z "$GH_SELF_UPDATE_TOKEN"; then
+            echo "::error::GH_SELF_UPDATE_TOKEN is not configured; disabling self-update"
+            gh --repo "$GITHUB_REPOSITORY" workflow disable "$GITHUB_WORKFLOW"
+            exit 1
+          fi
+      - name: Check out the fork default branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Discover the canonical parent
+        id: parent
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 updater/self_update.py discover
+          --github-output "$GITHUB_OUTPUT"
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Configure the rebase identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Rebase, validate, and test without credentials
+        id: update
+        run: >-
+          python3 updater/self_update.py prepare
+          --repository "${{ github.repository }}"
+          --parent-name "${{ steps.parent.outputs.parent_name }}"
+          --upstream-url "${{ steps.parent.outputs.upstream_url }}"
+          --upstream-branch "${{ steps.parent.outputs.upstream_branch }}"
+          --fork-branch "${{ github.event.repository.default_branch }}"
+          --github-output "$GITHUB_OUTPUT"
+          --github-summary "$GITHUB_STEP_SUMMARY"
+      - name: Push the tested rebase with an exact lease
+        if: steps.update.outputs.changed == 'true'
+        env:
+          FORK_BRANCH: ${{ steps.update.outputs.fork_branch }}
+          GH_SELF_UPDATE_TOKEN: ${{ secrets.GH_SELF_UPDATE_TOKEN }}
+          ORIGINAL_SHA: ${{ steps.update.outputs.original_sha }}
+        run: |
+          authorization="$(printf 'x-access-token:%s' "$GH_SELF_UPDATE_TOKEN" | base64 | tr -d '\n')"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $authorization"
+          git push \
+            "--force-with-lease=refs/heads/$FORK_BRANCH:$ORIGINAL_SHA" \
+            origin \
+            "HEAD:refs/heads/$FORK_BRANCH"

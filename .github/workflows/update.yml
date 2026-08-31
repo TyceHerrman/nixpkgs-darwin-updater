@@ -32,6 +32,16 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+      - name: Resolve the package manifest
+        id: manifest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UPDATER_MANIFEST_REF: ${{ vars.UPDATER_MANIFEST_REF }}
+        run: >-
+          python3 updater/manifest_source.py
+          --output-manifest "$RUNNER_TEMP/updater-packages.json"
+          --github-output "$GITHUB_OUTPUT"
+          --github-summary "$GITHUB_STEP_SUMMARY"
       - name: Run the read-only preflight
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -73,6 +83,16 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+      - name: Resolve the package manifest
+        id: manifest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UPDATER_MANIFEST_REF: ${{ vars.UPDATER_MANIFEST_REF }}
+        run: >-
+          python3 updater/manifest_source.py
+          --output-manifest "$RUNNER_TEMP/updater-packages.json"
+          --github-output "$GITHUB_OUTPUT"
+          --github-summary "$GITHUB_STEP_SUMMARY"
       - name: Detect release candidates
         id: releases
         env:
@@ -80,7 +100,7 @@ jobs:
           NIXPKGS_FORK_REPOSITORY: ${{ steps.configuration.outputs.fork_repository }}
         run: >-
           python3 updater/check_releases.py
-          --manifest updater/packages.json
+          --manifest "${{ steps.manifest.outputs.manifest_path }}"
           --github-output "$GITHUB_OUTPUT"
           --github-summary "$GITHUB_STEP_SUMMARY"
 
