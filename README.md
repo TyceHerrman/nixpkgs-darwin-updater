@@ -88,10 +88,11 @@ To enable it in a downstream fork:
 2. Save it as the Actions secret `GH_SELF_UPDATE_TOKEN`.
 3. Open **Actions > self-update** and enable the workflow.
 
-The token is removed from the environment before newly rebased code is tested
-and is provided only to the final Git push. A conflict, invalid manifest,
-failing test, or lease race leaves the remote fork untouched. If the token is
-missing, the workflow fails and disables itself.
+The token is provided only to the final credential-and-push step, which runs on
+a fresh runner. Newly rebased code is tested on a separate runner with token and
+runner-command-file variables removed, then transferred as a Git bundle. A
+conflict, invalid manifest, failing test, or lease race leaves the remote fork
+untouched. If the token is missing, the workflow fails and disables itself.
 
 If a rebase conflicts, resolve it locally while retaining your manifest:
 

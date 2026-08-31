@@ -137,7 +137,18 @@ def rebase_onto_parent(
 
 def _run_checks(repository_dir: Path, test_commands) -> None:
     check_environment = os.environ.copy()
-    for name in ("GH_SELF_UPDATE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+    for name in (
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+        "ACTIONS_ID_TOKEN_REQUEST_URL",
+        "ACTIONS_RUNTIME_TOKEN",
+        "GH_SELF_UPDATE_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_ENV",
+        "GITHUB_OUTPUT",
+        "GITHUB_PATH",
+        "GITHUB_STEP_SUMMARY",
+        "GITHUB_TOKEN",
+    ):
         check_environment.pop(name, None)
     for command in test_commands:
         result = subprocess.run(

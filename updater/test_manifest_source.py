@@ -131,6 +131,21 @@ class ManifestSourceTests(unittest.TestCase):
                     local_sha="4" * 40,
                 )
 
+    def test_pull_request_namespace_is_not_accepted_as_a_manifest_ref(self):
+        with tempfile.TemporaryDirectory() as directory:
+            local = self.write_manifest(directory, [PACKAGE])
+            for manifest_ref in ("refs/pull/123/head", "pull/123/head"):
+                with self.subTest(manifest_ref=manifest_ref):
+                    with self.assertRaisesRegex(ValueError, "invalid manifest ref"):
+                        manifest_source.resolve_manifest(
+                            client=RecordingClient(),
+                            repository="person/nixpkgs-darwin-updater",
+                            local_manifest=local,
+                            manifest_ref=manifest_ref,
+                            output_manifest=Path(directory) / "resolved.json",
+                            local_sha="4" * 40,
+                        )
+
     def test_summary_identifies_exact_source_and_packages(self):
         commit_sha = "b" * 40
         client = RecordingClient(

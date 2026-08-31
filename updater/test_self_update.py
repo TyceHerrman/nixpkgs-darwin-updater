@@ -147,7 +147,7 @@ class GitSynchronizationTests(unittest.TestCase):
                 fixture.original_fork_sha,
             )
 
-    def test_rebased_checks_do_not_receive_github_tokens(self):
+    def test_rebased_checks_do_not_receive_tokens_or_runner_command_files(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture = RepositoryFixture(directory)
             observed = Path(directory) / "observed-environment.json"
@@ -157,7 +157,9 @@ class GitSynchronizationTests(unittest.TestCase):
                 "import json, os, pathlib; "
                 f"pathlib.Path({str(observed)!r}).write_text(json.dumps("
                 "{name: os.environ.get(name) for name in "
-                "('GH_SELF_UPDATE_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN')}))",
+                "('GH_SELF_UPDATE_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN', "
+                "'GITHUB_ENV', 'GITHUB_PATH', 'GITHUB_OUTPUT', "
+                "'GITHUB_STEP_SUMMARY')}))",
             )
 
             with patch.dict(
@@ -166,6 +168,10 @@ class GitSynchronizationTests(unittest.TestCase):
                     "GH_SELF_UPDATE_TOKEN": "long-lived-secret",
                     "GITHUB_TOKEN": "job-token",
                     "GH_TOKEN": "cli-token",
+                    "GITHUB_ENV": "/tmp/github-env",
+                    "GITHUB_PATH": "/tmp/github-path",
+                    "GITHUB_OUTPUT": "/tmp/github-output",
+                    "GITHUB_STEP_SUMMARY": "/tmp/github-summary",
                 },
             ):
                 self_update.synchronize(
@@ -183,6 +189,10 @@ class GitSynchronizationTests(unittest.TestCase):
                     "GH_SELF_UPDATE_TOKEN": None,
                     "GITHUB_TOKEN": None,
                     "GH_TOKEN": None,
+                    "GITHUB_ENV": None,
+                    "GITHUB_PATH": None,
+                    "GITHUB_OUTPUT": None,
+                    "GITHUB_STEP_SUMMARY": None,
                 },
             )
 

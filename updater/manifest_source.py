@@ -22,12 +22,18 @@ class ResolvedManifest:
 
 
 def validate_manifest_ref(manifest_ref: str) -> str:
+    lowered_ref = manifest_ref.lower()
     if (
         re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}", manifest_ref) is None
         or ".." in manifest_ref
         or "//" in manifest_ref
         or "@{" in manifest_ref
         or manifest_ref.endswith(("/", ".", ".lock"))
+        or lowered_ref.startswith(("pull/", "refs/pull/"))
+        or (
+            lowered_ref.startswith("refs/")
+            and not lowered_ref.startswith(("refs/heads/", "refs/tags/"))
+        )
     ):
         raise ValueError(f"invalid manifest ref: {manifest_ref!r}")
     return manifest_ref
