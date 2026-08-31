@@ -1,0 +1,140 @@
+name: self-update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 3 * * *"
+
+permissions: {}
+
+concurrency:
+  group: self-update-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.event.repository.fork == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.update.outputs.changed }}
+      original_sha: ${{ steps.update.outputs.original_sha }}
+      rebased_sha: ${{ steps.update.outputs.rebased_sha }}
+    steps:
+      - name: Check out the fork default branch
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Discover the canonical parent
+        id: parent
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 updater/self_update.py discover
+          --github-output "$GITHUB_OUTPUT"
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Configure the rebase identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Rebase, validate, and test without credentials
+        id: update
+        run: >-
+          python3 updater/self_update.py prepare
+          --repository "${{ github.repository }}"
+          --parent-name "${{ steps.parent.outputs.parent_name }}"
+          --upstream-url "${{ steps.parent.outputs.upstream_url }}"
+          --upstream-branch "${{ steps.parent.outputs.upstream_branch }}"
+          --fork-branch "${{ github.event.repository.default_branch }}"
+          --github-output "$GITHUB_OUTPUT"
+          --github-summary "$GITHUB_STEP_SUMMARY"
+      - name: Bundle the tested commit
+        if: steps.update.outputs.changed == 'true'
+        env:
+          REBASED_SHA: ${{ steps.update.outputs.rebased_sha }}
+        run: |
+          if ! [[ "$REBASED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid rebased commit"
+            exit 1
+          fi
+          /usr/bin/git update-ref refs/self-update/rebased "$REBASED_SHA"
+          /usr/bin/git bundle create "$RUNNER_TEMP/self-update.bundle" refs/self-update/rebased
+      - name: Upload the tested commit
+        if: steps.update.outputs.changed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: self-update-rebase-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/self-update.bundle
+          if-no-files-found: error
+          retention-days: 1
+
+  push:
+    if: ${{ always() && github.event.repository.fork == true }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Download the tested commit
+        if: needs.prepare.result == 'success' && needs.prepare.outputs.changed == 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: self-update-rebase-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/self-update
+      - name: Validate credentials and push the tested commit with an exact lease
+        if: always()
+        env:
+          CHANGED: ${{ needs.prepare.outputs.changed }}
+          FORK_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_SELF_UPDATE_TOKEN: ${{ secrets.GH_SELF_UPDATE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          ORIGINAL_SHA: ${{ needs.prepare.outputs.original_sha }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          REBASED_SHA: ${{ needs.prepare.outputs.rebased_sha }}
+        run: |
+          if test -z "$GH_SELF_UPDATE_TOKEN"; then
+            echo "::error::GH_SELF_UPDATE_TOKEN is not configured; disabling self-update"
+            gh --repo "$GITHUB_REPOSITORY" workflow disable "$GITHUB_WORKFLOW"
+            exit 1
+          fi
+          if test "$PREPARE_RESULT" != success; then
+            echo "Preparation did not succeed; there is no tested commit to push"
+            exit 0
+          fi
+          if test "$CHANGED" != true; then
+            echo "Fork is already current"
+            exit 0
+          fi
+          if ! [[ "$ORIGINAL_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+             ! [[ "$REBASED_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+             ! /usr/bin/git check-ref-format --branch "$FORK_BRANCH" >/dev/null; then
+            echo "::error::Invalid self-update metadata"
+            exit 1
+          fi
+
+          push_repo="$(mktemp -d "$RUNNER_TEMP/self-update-push.XXXXXX")"
+          /usr/bin/git init --bare "$push_repo"
+          /usr/bin/git -C "$push_repo" fetch \
+            "$RUNNER_TEMP/self-update/self-update.bundle" \
+            refs/self-update/rebased:refs/self-update/rebased
+          bundled_sha="$(/usr/bin/git -C "$push_repo" rev-parse refs/self-update/rebased)"
+          if test "$bundled_sha" != "$REBASED_SHA"; then
+            echo "::error::Downloaded commit does not match the tested commit"
+            exit 1
+          fi
+
+          /usr/bin/git -C "$push_repo" remote add \
+            origin "https://github.com/$GITHUB_REPOSITORY.git"
+          authorization="$(printf 'x-access-token:%s' "$GH_SELF_UPDATE_TOKEN" | /usr/bin/base64 | /usr/bin/tr -d '\n')"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $authorization"
+          /usr/bin/git -C "$push_repo" push \
+            "--force-with-lease=refs/heads/$FORK_BRANCH:$ORIGINAL_SHA" \
+            origin \
+            "refs/self-update/rebased:refs/heads/$FORK_BRANCH"
