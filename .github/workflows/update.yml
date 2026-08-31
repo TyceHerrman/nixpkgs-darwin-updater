@@ -1,0 +1,262 @@
+name: Darwin nixpkgs updater
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Validate access or run the complete updater
+        required: true
+        default: preflight
+        type: choice
+        options:
+          - preflight
+          - full
+
+permissions: {}
+
+concurrency:
+  group: darwin-nixpkgs-updater-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Validate repository access
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'preflight'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the updater
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Run the read-only preflight
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NIXPKGS_FORK_REPOSITORY: ${{ vars.NIXPKGS_FORK_REPOSITORY }}
+          NIXPKGS_PR_TOKEN: ${{ secrets.NIXPKGS_PR_TOKEN }}
+          NIXPKGS_REVIEW_GHA_ENABLED: ${{ vars.NIXPKGS_REVIEW_GHA_ENABLED || 'false' }}
+          NIXPKGS_REVIEW_GHA_REPOSITORY: ${{ vars.NIXPKGS_REVIEW_GHA_REPOSITORY }}
+          NIXPKGS_REVIEW_GHA_TOKEN: ${{ secrets.NIXPKGS_REVIEW_GHA_TOKEN }}
+        run: >-
+          python3 updater/preflight.py
+          --github-summary "$GITHUB_STEP_SUMMARY"
+
+  detect:
+    name: Detect stable releases
+    if: >-
+      (github.event_name == 'schedule' && vars.UPDATER_ENABLED == 'true') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      base_sha: ${{ steps.releases.outputs.base_sha }}
+      fork_owner: ${{ steps.configuration.outputs.fork_owner }}
+      fork_repository: ${{ steps.configuration.outputs.fork_repository }}
+      has_updates: ${{ steps.releases.outputs.has_updates }}
+      matrix: ${{ steps.releases.outputs.matrix }}
+    steps:
+      - name: Resolve the target nixpkgs fork
+        id: configuration
+        env:
+          FORK_OVERRIDE: ${{ vars.NIXPKGS_FORK_REPOSITORY }}
+        run: |
+          fork_repository="${FORK_OVERRIDE:-${GITHUB_REPOSITORY_OWNER}/nixpkgs}"
+          fork_owner="${fork_repository%%/*}"
+          printf 'fork_repository=%s\n' "$fork_repository" >>"$GITHUB_OUTPUT"
+          printf 'fork_owner=%s\n' "$fork_owner" >>"$GITHUB_OUTPUT"
+      - name: Check out the updater
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Detect release candidates
+        id: releases
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NIXPKGS_FORK_REPOSITORY: ${{ steps.configuration.outputs.fork_repository }}
+        run: >-
+          python3 updater/check_releases.py
+          --manifest updater/packages.json
+          --github-output "$GITHUB_OUTPUT"
+          --github-summary "$GITHUB_STEP_SUMMARY"
+
+  update:
+    name: Update ${{ matrix.attr }} to ${{ matrix.new_version }}
+    needs: detect
+    if: needs.detect.result == 'success' && needs.detect.outputs.has_updates == 'true'
+    runs-on: macos-15
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    steps:
+      - name: Check out the updater
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          path: automation
+          persist-credentials: false
+      - name: Check out the inspected upstream revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: NixOS/nixpkgs
+          ref: ${{ needs.detect.outputs.base_sha }}
+          fetch-depth: 1
+          path: nixpkgs
+          persist-credentials: false
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Configure the update commit identity
+        working-directory: nixpkgs
+        run: |
+          git config user.name "${GITHUB_REPOSITORY_OWNER} nixpkgs updater"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Run the package update script
+        working-directory: nixpkgs
+        env:
+          ATTR: ${{ matrix.attr }}
+        run: >-
+          nix-shell -I nixpkgs=. maintainers/scripts/update.nix
+          --argstr package "$ATTR"
+          --arg commit true
+          --arg skip-prompt true
+      - name: Validate the update commit and version
+        working-directory: nixpkgs
+        env:
+          BASE_SHA: ${{ needs.detect.outputs.base_sha }}
+          NEW_VERSION: ${{ matrix.new_version }}
+          PACKAGE_FILE: ${{ matrix.package_file }}
+        run: |
+          test "$(git rev-list --count "$BASE_SHA..HEAD")" = 1
+          test -z "$(git status --porcelain)"
+          changed_files="$(git diff --name-only "$BASE_SHA" HEAD)"
+          test "$changed_files" = "$PACKAGE_FILE"
+          python3 - "$PACKAGE_FILE" "$NEW_VERSION" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          package_file, expected = sys.argv[1:]
+          versions = re.findall(
+              r'^\s*version\s*=\s*"([^"]+)"\s*;',
+              Path(package_file).read_text(),
+              re.MULTILINE,
+          )
+          if versions != [expected]:
+              raise SystemExit(
+                  f"expected version {expected!r} in {package_file}, got {versions!r}"
+              )
+          PY
+      - name: Build the package and passthru tests
+        env:
+          ATTR: ${{ matrix.attr }}
+        run: >-
+          python3 automation/updater/verify_package.py
+          --attr "$ATTR"
+          --nixpkgs "$GITHUB_WORKSPACE/nixpkgs"
+          --tests-expression "$GITHUB_WORKSPACE/automation/updater/passthru-tests.nix"
+      - name: Push the validated automation branch
+        working-directory: nixpkgs
+        env:
+          BRANCH: ${{ matrix.branch }}
+          FORK_OWNER: ${{ needs.detect.outputs.fork_owner }}
+          FORK_REPOSITORY: ${{ needs.detect.outputs.fork_repository }}
+          GH_TOKEN: ${{ secrets.NIXPKGS_PR_TOKEN }}
+        run: |
+          if test -z "$GH_TOKEN"; then
+            echo "NIXPKGS_PR_TOKEN is not configured" >&2
+            exit 1
+          fi
+          existing_pr_count="$(gh api --method GET \
+            repos/NixOS/nixpkgs/pulls \
+            -f state=open \
+            -f "head=$FORK_OWNER:$BRANCH" \
+            --jq length)"
+          test "$existing_pr_count" = 0
+          authorization="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $authorization" \
+            push --force "https://github.com/$FORK_REPOSITORY.git" \
+            "HEAD:refs/heads/$BRANCH"
+      - name: Open an upstream draft pull request
+        working-directory: nixpkgs
+        env:
+          ATTR: ${{ matrix.attr }}
+          BASE_SHA: ${{ needs.detect.outputs.base_sha }}
+          BRANCH: ${{ matrix.branch }}
+          FORK_OWNER: ${{ needs.detect.outputs.fork_owner }}
+          GH_TOKEN: ${{ secrets.NIXPKGS_PR_TOKEN }}
+          NEW_VERSION: ${{ matrix.new_version }}
+          OLD_VERSION: ${{ matrix.old_version }}
+          RELEASE_URL: ${{ matrix.release_url }}
+          TITLE: ${{ matrix.title }}
+        run: |
+          body="$(printf '%s\n' \
+            "## Package update" \
+            "" \
+            "- Version: \`$OLD_VERSION\` -> \`$NEW_VERSION\`" \
+            "- Upstream release: $RELEASE_URL" \
+            "- Nixpkgs base: \`$BASE_SHA\`" \
+            "" \
+            "## Verification" \
+            "" \
+            "- Ran the package's declared nixpkgs update script" \
+            "- Built \`$ATTR\` on \`aarch64-darwin\`, including its normal hooks" \
+            "- Built every derivation exposed through \`$ATTR.passthru.tests\`" \
+            "" \
+            "This draft was generated by nixpkgs-darwin-updater and requires manual review.")"
+          gh pr create \
+            --repo NixOS/nixpkgs \
+            --base master \
+            --head "$FORK_OWNER:$BRANCH" \
+            --title "$TITLE" \
+            --body "$body" \
+            --draft
+      - name: Record the update result
+        if: always()
+        env:
+          ATTR: ${{ matrix.attr }}
+          NEW_VERSION: ${{ matrix.new_version }}
+          RELEASE_URL: ${{ matrix.release_url }}
+          RESULT: ${{ job.status }}
+        run: |
+          printf '%s\n' \
+            "## $ATTR $NEW_VERSION" \
+            "" \
+            "- Result: $RESULT" \
+            "- Release: $RELEASE_URL" >>"$GITHUB_STEP_SUMMARY"
+
+  review-gate:
+    name: Start Darwin review for ${{ matrix.attr }} after nixpkgs CI
+    needs: [detect, update]
+    if: >-
+      always() && vars.NIXPKGS_REVIEW_GHA_ENABLED == 'true' &&
+      needs.update.result == 'success' &&
+      needs.detect.outputs.has_updates == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 185
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    steps:
+      - name: Check out the updater
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Wait for nixpkgs CI and dispatch the Darwin review
+        env:
+          BRANCH: ${{ matrix.branch }}
+          FORK_OWNER: ${{ needs.detect.outputs.fork_owner }}
+          GITHUB_TOKEN: ${{ secrets.NIXPKGS_PR_TOKEN }}
+          NIXPKGS_REVIEW_GHA_REPOSITORY: ${{ vars.NIXPKGS_REVIEW_GHA_REPOSITORY || format('{0}/nixpkgs-review-gha', github.repository_owner) }}
+          NIXPKGS_REVIEW_GHA_TOKEN: ${{ secrets.NIXPKGS_REVIEW_GHA_TOKEN }}
+        run: >-
+          python3 updater/review_gate.py
+          --head "$FORK_OWNER:$BRANCH"
+          --github-summary "$GITHUB_STEP_SUMMARY"

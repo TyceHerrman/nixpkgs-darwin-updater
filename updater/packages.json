@@ -1,0 +1,18 @@
+[
+  {
+    "attr": "harper-desktop",
+    "package_file": "pkgs/by-name/ha/harper-desktop/package.nix",
+    "upstream": "Automattic/harper",
+    "maintainer": "tyceherrman",
+    "platform_pattern": "platforms\\s*=\\s*lib\\.platforms\\.darwin\\s*;",
+    "required_asset": "Harper_{version}_universal.dmg"
+  },
+  {
+    "attr": "whatcable",
+    "package_file": "pkgs/by-name/wh/whatcable/package.nix",
+    "upstream": "darrylmorley/whatcable",
+    "maintainer": "tyceherrman",
+    "platform_pattern": "platforms\\s*=\\s*\\[\\s*\"aarch64-darwin\"\\s*\\]\\s*;",
+    "required_asset": "WhatCable.zip"
+  }
+]
