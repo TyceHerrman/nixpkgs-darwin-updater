@@ -361,13 +361,6 @@ def gate_release_asset(
         (issue for issue in issues if compare_versions(version, issue.version) == 0),
         None,
     )
-    if matching_issue is not None:
-        return AssetGate(
-            False,
-            f"{package.attr}: {version} suppressed by blocked-release issue "
-            f"{matching_issue.url}",
-        )
-
     if package.required_asset is None:
         return AssetGate(True, None)
 
@@ -377,7 +370,22 @@ def gate_release_asset(
         for asset in assets
     )
     if asset_is_ready:
+        if matching_issue is not None:
+            client.comment_issue(
+                repository,
+                matching_issue.number,
+                f"Required release asset is now available for {version}: {release_url}",
+            )
+            if matching_issue.state == "open":
+                client.close_issue(repository, matching_issue.number)
         return AssetGate(True, None)
+
+    if matching_issue is not None:
+        return AssetGate(
+            False,
+            f"{package.attr}: {version} suppressed by blocked-release issue "
+            f"{matching_issue.url}",
+        )
 
     title = f"{package.attr} {version}: required release asset is unavailable"
     body = "\n".join(
@@ -389,7 +397,10 @@ def gate_release_asset(
             f"- Upstream release: {release_url}",
             f"- Expected asset: `{required_asset}`",
             "",
-            "The updater will ignore this version and evaluate the next release.",
+            (
+                "The updater will recheck this release on each scheduled run and "
+                "resume the update when the asset is ready."
+            ),
         )
     )
     issue = client.create_issue(repository, title=title, body=body)
