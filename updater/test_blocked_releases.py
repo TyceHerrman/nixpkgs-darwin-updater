@@ -30,9 +30,12 @@ class InMemoryIssueClient:
         self.comments.append((repository, number, body))
 
     def close_issue(self, repository, number):
+        self.update_issue(repository, number, state="closed")
+
+    def update_issue(self, repository, number, **fields):
         for issue in self.issues:
             if issue["number"] == number:
-                issue["state"] = "closed"
+                issue.update(fields)
                 return
         raise AssertionError(f"missing issue {number}")
 

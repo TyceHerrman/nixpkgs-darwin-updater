@@ -120,7 +120,7 @@ The canonical repository keeps `self-update` disabled and does not define
 `GH_SELF_UPDATE_TOKEN`, because it is the parent rather than a fork. After any
 manifest-branch edit, run `preflight` before the next `full` or scheduled run.
 
-## Missing release assets
+## Known-release availability and missing assets
 
 When a newer release lacks its configured asset, has an incomplete upload, or
 publishes an empty asset, no macOS update job is created. The detector opens one
@@ -129,9 +129,25 @@ detector rechecks the release assets while reusing that issue, even if it was
 manually closed. It does not create duplicate issues or start a macOS job while
 the asset remains unavailable.
 
+The detector also discovers versions named by its open update PRs and existing
+blocked-release issues. It checks each exact GitHub release before reporting a
+package as having no newer release. This protects against an upstream project
+deleting, drafting, or otherwise making a release unavailable after an update PR
+has already been opened—even when GitHub's `latest` endpoint falls back to an
+older version. A surviving Git tag alone is never treated as an available
+release because it does not provide the release assets.
+
+An unavailable known release is recorded in the same package/version issue,
+including the affected PR when there is one. Closed issues continue to suppress
+duplicate notifications. The detector rechecks on every run, reopens a recovered
+issue if the release disappears again, and does not recreate an existing PR.
+Authentication, rate-limit, network, malformed-response, and GitHub server
+failures fail detection; they are not mislabeled as withdrawn releases.
+
 If the asset later becomes ready for the same version, the workflow comments on
 the blocked-release issue, closes it when still open, and resumes the normal
-Darwin update. This catches assets attached after the initial GitHub release.
+Darwin update. If an update PR already exists, it remains the sole PR. This
+catches releases or assets restored after the initial GitHub release.
 
 When a newer release appears, the workflow comments on and closes the previous
 open issue as superseded and evaluates the new release independently. Failure
