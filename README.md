@@ -124,13 +124,19 @@ manifest-branch edit, run `preflight` before the next `full` or scheduled run.
 
 When a newer release lacks its configured asset, has an incomplete upload, or
 publishes an empty asset, no macOS update job is created. The detector opens one
-issue in your updater fork for that package and version. That issue remains the
-durable suppression record even if manually closed.
+issue in your updater fork for that package and version. On later runs, the
+detector rechecks the release assets while reusing that issue, even if it was
+manually closed. It does not create duplicate issues or start a macOS job while
+the asset remains unavailable.
+
+If the asset later becomes ready for the same version, the workflow comments on
+the blocked-release issue, closes it when still open, and resumes the normal
+Darwin update. This catches assets attached after the initial GitHub release.
 
 When a newer release appears, the workflow comments on and closes the previous
-open issue as superseded. It evaluates the new release independently. Failure
-to record a blocked release fails detection rather than silently retrying it
-every six hours.
+open issue as superseded and evaluates the new release independently. Failure
+to create or update a blocked-release issue fails detection rather than losing
+the notification or recovery record.
 
 ## Generic verification
 

@@ -80,7 +80,43 @@ class BlockedReleaseTests(unittest.TestCase):
             issue["body"],
         )
 
-    def test_same_release_stays_suppressed_after_manual_issue_closure(self):
+    def test_same_release_becomes_actionable_when_asset_appears(self):
+        client = InMemoryIssueClient()
+        check_releases.gate_release_asset(
+            client,
+            repository=self.repository,
+            package=package(),
+            version="2.0.0",
+            release_url=self.release_url,
+            assets=(),
+        )
+
+        result = check_releases.gate_release_asset(
+            client,
+            repository=self.repository,
+            package=package(),
+            version="2.0.0",
+            release_url=self.release_url,
+            assets=(asset("Example-2.0.0.dmg"),),
+        )
+
+        self.assertTrue(result.actionable)
+        self.assertEqual(client.issues[0]["state"], "closed")
+        self.assertEqual(
+            client.comments,
+            [
+                (
+                    self.repository,
+                    1,
+                    (
+                        "Required release asset is now available for 2.0.0: "
+                        "https://github.com/example/example-app/releases/tag/v2.0.0"
+                    ),
+                )
+            ],
+        )
+
+    def test_same_release_recovers_after_manual_issue_closure(self):
         client = InMemoryIssueClient()
         first = check_releases.gate_release_asset(
             client,
@@ -102,8 +138,22 @@ class BlockedReleaseTests(unittest.TestCase):
             assets=(asset("Example-2.0.0.dmg"),),
         )
 
-        self.assertFalse(second.actionable)
+        self.assertTrue(second.actionable)
         self.assertEqual(len(client.issues), 1)
+        self.assertEqual(client.issues[0]["state"], "closed")
+        self.assertEqual(
+            client.comments,
+            [
+                (
+                    self.repository,
+                    1,
+                    (
+                        "Required release asset is now available for 2.0.0: "
+                        "https://github.com/example/example-app/releases/tag/v2.0.0"
+                    ),
+                )
+            ],
+        )
 
     def test_newer_valid_release_closes_old_issue_and_becomes_actionable(self):
         client = InMemoryIssueClient()

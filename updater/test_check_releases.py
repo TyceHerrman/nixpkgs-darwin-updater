@@ -218,6 +218,9 @@ def harper_collection_responses(*, assets, issues=()):
             page=2,
         ): [],
         method_api_key("POST", f"/repos/{updater_repository}/issues"): blocked_issue,
+        method_api_key(
+            "POST", f"/repos/{updater_repository}/issues/1/comments"
+        ): {"id": 2},
         api_key(
             "/repos/NixOS/nixpkgs/pulls",
             state="open",
@@ -326,7 +329,7 @@ class PackageSourceTests(unittest.TestCase):
 
 
 class CollectionTests(unittest.TestCase):
-    def test_records_missing_asset_and_never_retries_the_same_release(self):
+    def test_records_missing_asset_and_rechecks_the_same_release(self):
         updater_repository = "person/nixpkgs-darwin-updater"
         missing_client = check_releases.GitHubClient(
             "test-token",
@@ -372,12 +375,11 @@ class CollectionTests(unittest.TestCase):
             updater_repository=updater_repository,
         )
 
-        self.assertEqual(uploaded_result.candidates, ())
-        self.assertIn(
-            "harper-desktop: 2.9.1 suppressed by blocked-release issue "
-            f"https://github.com/{updater_repository}/issues/1",
-            uploaded_result.notes,
+        self.assertEqual(
+            [candidate.attr for candidate in uploaded_result.candidates],
+            ["harper-desktop"],
         )
+        self.assertEqual(uploaded_result.candidates[0].new_version, "2.9.1")
 
     def test_rejects_malformed_release_asset_data(self):
         client = check_releases.GitHubClient(
