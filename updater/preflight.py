@@ -19,6 +19,38 @@ class PreflightResult:
     login: str
     fork_repository: str
     review_repository: str | None
+    review_mode: str
+
+
+@dataclass(frozen=True)
+class ReviewIntegration:
+    mode: str
+    repository: str | None
+    token: str | None
+
+
+def resolve_review_integration(
+    *,
+    review_enabled: bool,
+    updater_repository: str,
+    dispatch_repository: str | None,
+    dispatch_token: str | None,
+    direct_repository: str | None,
+    direct_token: str | None,
+) -> ReviewIntegration:
+    if not review_enabled:
+        return ReviewIntegration("disabled", None, None)
+    if dispatch_repository:
+        if not dispatch_token:
+            raise PreflightError("NIXPKGS_REVIEW_DISPATCH_TOKEN is not configured")
+        return ReviewIntegration("controller", dispatch_repository, dispatch_token)
+    if not direct_repository:
+        direct_repository = (
+            f"{updater_repository.split('/', 1)[0]}/nixpkgs-review-gha"
+        )
+    if not direct_token:
+        raise PreflightError("NIXPKGS_REVIEW_GHA_TOKEN is not configured")
+    return ReviewIntegration("direct", direct_repository, direct_token)
 
 
 def run_preflight(
@@ -28,6 +60,7 @@ def run_preflight(
     review_enabled: bool,
     review_client,
     review_repository: str | None,
+    review_mode: str = "direct",
 ) -> PreflightResult:
     validate_repository_name(fork_repository)
     user = pr_client.get_json("/user")
@@ -61,7 +94,7 @@ def run_preflight(
             raise PreflightError("review.yml is unavailable or inactive")
         resolved_review = review_repository
 
-    return PreflightResult(login, fork_repository, resolved_review)
+    return PreflightResult(login, fork_repository, resolved_review, review_mode)
 
 
 def parse_args(argv=None):
@@ -91,21 +124,26 @@ def main(argv=None):
     if review_setting not in {"true", "false"}:
         raise PreflightError("NIXPKGS_REVIEW_GHA_ENABLED must be true or false")
     review_enabled = review_setting == "true"
-    review_repository = os.environ.get("NIXPKGS_REVIEW_GHA_REPOSITORY")
-    if review_enabled and not review_repository:
-        review_repository = (
-            f"{repositories.updater_repository.split('/', 1)[0]}/nixpkgs-review-gha"
-        )
-    review_token = os.environ.get("NIXPKGS_REVIEW_GHA_TOKEN")
-    if review_enabled and not review_token:
-        raise PreflightError("NIXPKGS_REVIEW_GHA_TOKEN is not configured")
+    integration = resolve_review_integration(
+        review_enabled=review_enabled,
+        updater_repository=repositories.updater_repository,
+        dispatch_repository=os.environ.get("NIXPKGS_REVIEW_DISPATCH_REPOSITORY"),
+        dispatch_token=os.environ.get("NIXPKGS_REVIEW_DISPATCH_TOKEN"),
+        direct_repository=os.environ.get("NIXPKGS_REVIEW_GHA_REPOSITORY"),
+        direct_token=os.environ.get("NIXPKGS_REVIEW_GHA_TOKEN"),
+    )
 
     result = run_preflight(
         GitHubClient(pr_token),
         fork_repository=repositories.fork_repository,
         review_enabled=review_enabled,
-        review_client=GitHubClient(review_token) if review_enabled else None,
-        review_repository=review_repository,
+        review_client=(
+            GitHubClient(integration.token)
+            if integration.mode != "disabled"
+            else None
+        ),
+        review_repository=integration.repository,
+        review_mode=integration.mode,
     )
     payload = {
         "login": result.login,
@@ -122,7 +160,14 @@ def main(argv=None):
             "- Fork relationship and push access: verified",
         ]
         if result.review_repository is not None:
-            lines.append(f"- Review workflow: `{result.review_repository}/review.yml`")
+            if result.review_mode == "controller":
+                lines.append(
+                    f"- Review controller workflow: `{result.review_repository}/review.yml`"
+                )
+            else:
+                lines.append(
+                    f"- Direct review runner workflow: `{result.review_repository}/review.yml`"
+                )
         else:
             lines.append("- Review integration: disabled")
         with args.github_summary.open("a", encoding="utf-8") as summary:

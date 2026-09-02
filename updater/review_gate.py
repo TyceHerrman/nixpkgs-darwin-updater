@@ -23,6 +23,7 @@ class PullRequest:
 class DispatchResult:
     dispatched: bool
     existing_url: str | None
+    controller_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,7 @@ class GitHubCli:
             raise GateError("review repository is not configured")
         return self.review_repository
 
-    def _run_json(self, command, *, allowed_returncodes=(0,)):
+    def _run_json(self, command, *, allowed_returncodes=(0,), input=None):
         environment = os.environ.copy()
         environment["GH_TOKEN"] = self.token
         result = self.runner(
@@ -64,6 +65,7 @@ class GitHubCli:
             text=True,
             capture_output=True,
             check=False,
+            input=input,
         )
         if result.returncode not in allowed_returncodes:
             raise GateError(
@@ -185,6 +187,53 @@ class GitHubCli:
             ]
         )
 
+    def dispatch_controller_review(self, pull_request, attribute):
+        review_repository = self._require_review_repository()
+        payload = {
+            "ref": "main",
+            "inputs": {
+                "pr": str(pull_request),
+                "attribute": attribute,
+                "platform-scope": "darwin",
+                "force": False,
+            },
+        }
+        try:
+            reply = self._run_json(
+                [
+                    "gh",
+                    "api",
+                    "--method",
+                    "POST",
+                    f"repos/{review_repository}/actions/workflows/review.yml/dispatches",
+                    "-H",
+                    "X-GitHub-Api-Version: 2026-03-10",
+                    "--input",
+                    "-",
+                ],
+                input=json.dumps(payload, separators=(",", ":")),
+            )
+        except GateError as error:
+            raise GateError(
+                "controller dispatch response is uncertain; do not retry automatically"
+            ) from error
+
+        run_id = reply.get("workflow_run_id") if isinstance(reply, dict) else None
+        run_url = reply.get("run_url") if isinstance(reply, dict) else None
+        html_url = reply.get("html_url") if isinstance(reply, dict) else None
+        if (
+            type(run_id) is not int
+            or run_id <= 0
+            or run_url
+            != f"https://api.github.com/repos/{review_repository}/actions/runs/{run_id}"
+            or html_url
+            != f"https://github.com/{review_repository}/actions/runs/{run_id}"
+        ):
+            raise GateError(
+                "controller dispatch response is uncertain; do not retry automatically"
+            )
+        return html_url
+
 
 def dispatch_review_if_missing(client, pull_request):
     title = f"review #{pull_request}"
@@ -230,6 +279,35 @@ def run_review_gate(
     return GateOutcome(pull_request, checks, dispatch)
 
 
+def run_controller_review_gate(
+    read_client,
+    controller_client,
+    *,
+    head,
+    attribute,
+    interval_seconds,
+    max_attempts,
+    stable_observations,
+    sleep,
+):
+    pull_request = read_client.find_open_pull_request(head)
+    checks = wait_for_passing_checks(
+        lambda: read_client.pull_request_checks(pull_request.number),
+        interval_seconds=interval_seconds,
+        max_attempts=max_attempts,
+        stable_observations=stable_observations,
+        sleep=sleep,
+    )
+    controller_url = controller_client.dispatch_controller_review(
+        pull_request.number, attribute
+    )
+    return GateOutcome(
+        pull_request,
+        checks,
+        DispatchResult(True, None, controller_url),
+    )
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
@@ -242,9 +320,14 @@ def parse_args(argv=None):
     parser.add_argument("--interval-seconds", type=int, default=60)
     parser.add_argument("--stable-observations", type=int, default=3)
     parser.add_argument("--github-summary", type=Path)
+    parser.add_argument("--attribute")
     parser.add_argument(
         "--review-repository",
         default=os.environ.get("NIXPKGS_REVIEW_GHA_REPOSITORY"),
+    )
+    parser.add_argument(
+        "--dispatch-repository",
+        default=os.environ.get("NIXPKGS_REVIEW_DISPATCH_REPOSITORY"),
     )
     return parser.parse_args(argv)
 
@@ -264,38 +347,62 @@ def main(argv=None):
         raise GateError("timeout and interval must be positive")
     if args.stable_observations <= 0:
         raise GateError("stable observations must be positive")
-    if (
-        not args.review_repository
-        or re.fullmatch(
-            r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*",
-            args.review_repository,
-        )
-        is None
-    ):
-        raise GateError("review repository is not configured or invalid")
-
     read_token = os.environ.get("GITHUB_TOKEN")
-    dispatch_token = os.environ.get("NIXPKGS_REVIEW_GHA_TOKEN")
     if not read_token:
         raise GateError("GITHUB_TOKEN is not configured")
-    if not dispatch_token:
-        raise GateError("NIXPKGS_REVIEW_GHA_TOKEN is not configured")
 
     max_attempts = max(1, args.timeout_seconds // args.interval_seconds)
-    outcome = run_review_gate(
-        GitHubCli(read_token),
-        GitHubCli(dispatch_token, review_repository=args.review_repository),
-        head=args.head,
-        interval_seconds=args.interval_seconds,
-        max_attempts=max_attempts,
-        stable_observations=args.stable_observations,
-        sleep=time.sleep,
-    )
-
-    if outcome.dispatch.dispatched:
-        result = "dispatched a Darwin-only nixpkgs-review-gha run"
+    if args.dispatch_repository:
+        if not args.attribute:
+            raise GateError("--attribute is required for controller dispatch")
+        if (
+            re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*",
+                args.dispatch_repository,
+            )
+            is None
+        ):
+            raise GateError("dispatch repository is invalid")
+        dispatch_token = os.environ.get("NIXPKGS_REVIEW_DISPATCH_TOKEN")
+        if not dispatch_token:
+            raise GateError("NIXPKGS_REVIEW_DISPATCH_TOKEN is not configured")
+        outcome = run_controller_review_gate(
+            GitHubCli(read_token),
+            GitHubCli(dispatch_token, review_repository=args.dispatch_repository),
+            head=args.head,
+            attribute=args.attribute,
+            interval_seconds=args.interval_seconds,
+            max_attempts=max_attempts,
+            stable_observations=args.stable_observations,
+            sleep=time.sleep,
+        )
+        result = f"requested shared review controller: {outcome.dispatch.controller_url}"
     else:
-        result = f"review already exists: {outcome.dispatch.existing_url}"
+        if (
+            not args.review_repository
+            or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*",
+                args.review_repository,
+            )
+            is None
+        ):
+            raise GateError("review repository is not configured or invalid")
+        dispatch_token = os.environ.get("NIXPKGS_REVIEW_GHA_TOKEN")
+        if not dispatch_token:
+            raise GateError("NIXPKGS_REVIEW_GHA_TOKEN is not configured")
+        outcome = run_review_gate(
+            GitHubCli(read_token),
+            GitHubCli(dispatch_token, review_repository=args.review_repository),
+            head=args.head,
+            interval_seconds=args.interval_seconds,
+            max_attempts=max_attempts,
+            stable_observations=args.stable_observations,
+            sleep=time.sleep,
+        )
+        if outcome.dispatch.dispatched:
+            result = "dispatched a Darwin-only nixpkgs-review-gha run"
+        else:
+            result = f"review already exists: {outcome.dispatch.existing_url}"
     message = (
         f"{outcome.pull_request.url}: {len(outcome.checks)} checks passed or "
         f"skipped; {result}"
@@ -306,7 +413,14 @@ def main(argv=None):
             summary.write("## Darwin nixpkgs-review gate\n\n")
             summary.write(f"- Pull request: {outcome.pull_request.url}\n")
             summary.write(f"- Checks: {len(outcome.checks)} passed or skipped\n")
-            summary.write(f"- Result: {result}\n")
+            if args.dispatch_repository:
+                summary.write(
+                    "- Controller request: "
+                    f"[review.yml run]({outcome.dispatch.controller_url})\n"
+                )
+                summary.write("- Downstream build: pending controller dispatch\n")
+            else:
+                summary.write(f"- Review runner: {result}\n")
     return 0
 
 
