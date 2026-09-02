@@ -159,14 +159,38 @@ the notification or recovery record.
 The macOS job uses only nixpkgs-native mechanisms:
 
 1. Run the package's declared update script.
-2. Require exactly one clean update commit changing only `package_file` to the
-   detected version.
+2. Require exactly one clean update commit directly on the inspected upstream
+   base, changing only `package_file` from the inspected to the detected version.
+   Validate its subject and add its changelog reference when missing.
 3. Build the package, including its normal check and install-check hooks.
 4. Recursively discover and build every derivation exposed through the
    package's `passthru.tests`.
 
 There are no Harper-, WhatCable-, or other package-specific verifier scripts.
 Generated pull requests remain drafts and always require manual review.
+
+The updater enforces the mechanical parts of the nixpkgs
+[commit conventions](https://github.com/NixOS/nixpkgs/blob/master/pkgs/README.md#commit-conventions):
+the subject must be exactly `attribute: old-version -> new-version` (no trailing
+period), with a blank line before any body. It preserves the update script's
+explanation and existing trailers, adds `Changelog: <upstream release URL>` if
+missing, and checks the commit again after verification and before the push
+step. Preparation changes
+only commit metadata, preserving the package tree, parent, and original author.
+Any mismatch fails before publication; an invalid subject is not silently
+rewritten.
+
+The nixpkgs
+[automation policy](https://github.com/NixOS/nixpkgs/blob/master/CONTRIBUTING.md#automationai-policy)
+exempts maintainer-approved bots that run update scripts. This updater is
+intended for that use: maintainers configure their packages and it runs the
+declared update scripts. It does not use an LLM at runtime and does not add an
+`Assisted-by:` trailer or an AI disclosure to deterministic updates. If you use
+an AI tool to change a package or its commit/PR text manually,
+add the actual tool and model/version to an `Assisted-by:` commit trailer and
+disclose that assistance separately in the PR description. Existing trailers
+are preserved. These checks do not replace human responsibility for correctness,
+licensing, or the other nixpkgs contribution requirements.
 
 Each PR body uses `.github/PULL_REQUEST_TEMPLATE.md` from the exact upstream
 nixpkgs commit inspected by the detector—not a copied or abbreviated template.
