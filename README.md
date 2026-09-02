@@ -120,6 +120,14 @@ The canonical repository keeps `self-update` disabled and does not define
 `GH_SELF_UPDATE_TOKEN`, because it is the parent rather than a fork. After any
 manifest-branch edit, run `preflight` before the next `full` or scheduled run.
 
+### Contributing to canonical main
+
+Changes to `TyceHerrman/nixpkgs-darwin-updater` on `main` go through pull
+requests. The GitHub Actions `test` check compiles the Python sources and runs
+the unit and Nix expression tests; it must pass before merging. Use squash or
+rebase merging. An approving review is not required, but review conversations
+must be resolved. Downstream forks choose their own branch policies.
+
 ## Missing release assets
 
 When a newer release lacks its configured asset, has an incomplete upload, or
