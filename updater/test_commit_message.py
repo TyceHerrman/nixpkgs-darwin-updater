@@ -13,9 +13,7 @@ SUBJECT = "example-app: 1.0.0 -> 2.0.0"
 
 class CommitMessageTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(
-            prefix="codex-update-commit-", dir="/private/tmp"
-        )
+        self.temporary = tempfile.TemporaryDirectory(prefix="codex-update-commit-")
         self.addCleanup(self.temporary.cleanup)
         self.workspace = Path(self.temporary.name)
         self.nixpkgs = self.workspace / "nixpkgs"

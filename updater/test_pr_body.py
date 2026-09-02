@@ -29,9 +29,7 @@ def workflow_scripts():
 
 class PullRequestBodyTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(
-            prefix="codex-pr-body-", dir="/private/tmp"
-        )
+        self.temporary = tempfile.TemporaryDirectory(prefix="codex-pr-body-")
         self.addCleanup(self.temporary.cleanup)
         self.workspace = Path(self.temporary.name)
         self.nixpkgs = self.workspace / "nixpkgs"
