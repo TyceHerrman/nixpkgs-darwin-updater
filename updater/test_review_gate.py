@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -250,6 +251,82 @@ class GitHubCliTests(unittest.TestCase):
         )
         self.assertEqual(options["env"]["GH_TOKEN"], "dispatch-token")
 
+    def test_dispatches_the_controller_with_the_exact_darwin_payload(self):
+        runner = QueueRunner(
+            [
+                completed_json(
+                    {
+                        "workflow_run_id": 91,
+                        "run_url": (
+                            "https://api.github.com/repos/person/"
+                            "nixpkgs-contribution-workflows/actions/runs/91"
+                        ),
+                        "html_url": (
+                            "https://github.com/person/"
+                            "nixpkgs-contribution-workflows/actions/runs/91"
+                        ),
+                    }
+                )
+            ]
+        )
+        cli = review_gate.GitHubCli(
+            "controller-token",
+            review_repository="person/nixpkgs-contribution-workflows",
+            runner=runner,
+        )
+
+        url = cli.dispatch_controller_review(557203, "whatcable")
+
+        self.assertEqual(
+            url,
+            "https://github.com/person/nixpkgs-contribution-workflows/actions/runs/91",
+        )
+        command, options = runner.calls[0]
+        self.assertEqual(
+            command,
+            [
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                "repos/person/nixpkgs-contribution-workflows/actions/workflows/"
+                "review.yml/dispatches",
+                "-H",
+                "X-GitHub-Api-Version: 2026-03-10",
+                "--input",
+                "-",
+            ],
+        )
+        self.assertEqual(
+            json.loads(options["input"]),
+            {
+                "ref": "main",
+                "inputs": {
+                    "pr": "557203",
+                    "attribute": "whatcable",
+                    "platform-scope": "darwin",
+                    "force": False,
+                },
+            },
+        )
+        self.assertEqual(options["env"]["GH_TOKEN"], "controller-token")
+
+    def test_rejects_an_ambiguous_controller_response_without_retrying(self):
+        runner = QueueRunner([{"returncode": 0, "stdout": "", "stderr": ""}])
+        cli = review_gate.GitHubCli(
+            "controller-token",
+            review_repository="person/nixpkgs-contribution-workflows",
+            runner=runner,
+        )
+
+        with self.assertRaisesRegex(
+            review_gate.GateError,
+            "controller dispatch response is uncertain; do not retry automatically",
+        ):
+            cli.dispatch_controller_review(557203, "whatcable")
+
+        self.assertEqual(len(runner.calls), 1)
+
 
 class DispatchTests(unittest.TestCase):
     def test_skips_a_pull_request_that_already_has_a_review_run(self):
@@ -293,6 +370,90 @@ class DispatchTests(unittest.TestCase):
 
 
 class ReviewGateTests(unittest.TestCase):
+    def test_controller_gate_waits_for_ci_without_runner_deduplication(self):
+        class ReadClient:
+            def find_open_pull_request(self, _head):
+                return review_gate.PullRequest(
+                    557203, "https://github.com/NixOS/nixpkgs/pull/557203"
+                )
+
+            def pull_request_checks(self, _pull_request):
+                return [check("lint", "pass", "SUCCESS")]
+
+        class ControllerClient:
+            def __init__(self):
+                self.requests = []
+
+            def dispatch_controller_review(self, pull_request, attribute):
+                self.requests.append((pull_request, attribute))
+                return "https://github.com/person/controller/actions/runs/91"
+
+        controller_client = ControllerClient()
+
+        result = review_gate.run_controller_review_gate(
+            ReadClient(),
+            controller_client,
+            head="person:auto-update/whatcable-1.4.0",
+            attribute="whatcable",
+            interval_seconds=1,
+            max_attempts=1,
+            stable_observations=1,
+            sleep=lambda _seconds: None,
+        )
+
+        self.assertEqual(controller_client.requests, [(557203, "whatcable")])
+        self.assertTrue(result.dispatch.dispatched)
+        self.assertEqual(
+            result.dispatch.controller_url,
+            "https://github.com/person/controller/actions/runs/91",
+        )
+
+    def test_controller_mode_requires_an_attribute(self):
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_TOKEN": "read-token",
+                "NIXPKGS_REVIEW_DISPATCH_TOKEN": "controller-token",
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                review_gate.GateError,
+                "--attribute is required for controller dispatch",
+            ):
+                review_gate.main(
+                    [
+                        "--head",
+                        "person:auto-update/whatcable-1.4.0",
+                        "--dispatch-repository",
+                        "person/nixpkgs-contribution-workflows",
+                    ]
+                )
+
+    def test_controller_mode_requires_its_own_token(self):
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_TOKEN": "read-token",
+                "NIXPKGS_REVIEW_DISPATCH_TOKEN": "",
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                review_gate.GateError,
+                "NIXPKGS_REVIEW_DISPATCH_TOKEN is not configured",
+            ):
+                review_gate.main(
+                    [
+                        "--head",
+                        "person:auto-update/whatcable-1.4.0",
+                        "--attribute",
+                        "whatcable",
+                        "--dispatch-repository",
+                        "person/nixpkgs-contribution-workflows",
+                    ]
+                )
+
     def test_gates_the_exact_head_then_dispatches_its_pull_request(self):
         class ReadClient:
             def __init__(self):

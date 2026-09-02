@@ -27,6 +27,50 @@ def fork_payload(*, push=True):
 
 
 class PreflightTests(unittest.TestCase):
+    def test_controller_configuration_takes_precedence_without_a_direct_token(self):
+        integration = preflight.resolve_review_integration(
+            review_enabled=True,
+            updater_repository="person/nixpkgs-darwin-updater",
+            dispatch_repository="person/nixpkgs-contribution-workflows",
+            dispatch_token="controller-token",
+            direct_repository=None,
+            direct_token=None,
+        )
+
+        self.assertEqual(integration.mode, "controller")
+        self.assertEqual(
+            integration.repository, "person/nixpkgs-contribution-workflows"
+        )
+        self.assertEqual(integration.token, "controller-token")
+
+    def test_direct_configuration_uses_the_updater_owner_default(self):
+        integration = preflight.resolve_review_integration(
+            review_enabled=True,
+            updater_repository="person/nixpkgs-darwin-updater",
+            dispatch_repository=None,
+            dispatch_token=None,
+            direct_repository=None,
+            direct_token="direct-token",
+        )
+
+        self.assertEqual(integration.mode, "direct")
+        self.assertEqual(integration.repository, "person/nixpkgs-review-gha")
+        self.assertEqual(integration.token, "direct-token")
+
+    def test_controller_configuration_requires_its_own_token(self):
+        with self.assertRaisesRegex(
+            preflight.PreflightError,
+            "NIXPKGS_REVIEW_DISPATCH_TOKEN is not configured",
+        ):
+            preflight.resolve_review_integration(
+                review_enabled=True,
+                updater_repository="person/nixpkgs-darwin-updater",
+                dispatch_repository="person/nixpkgs-contribution-workflows",
+                dispatch_token=None,
+                direct_repository="person/nixpkgs-review-gha",
+                direct_token="direct-token",
+            )
+
     def test_validates_token_identity_and_nixpkgs_fork_push_access(self):
         client = MappingClient(
             {
@@ -91,6 +135,33 @@ class PreflightTests(unittest.TestCase):
         )
 
         self.assertEqual(result.review_repository, "person/nixpkgs-review-gha")
+
+    def test_rejects_an_inactive_controller_workflow(self):
+        pr_client = MappingClient(
+            {
+                "/user": {"login": "person"},
+                "/repos/person/nixpkgs": fork_payload(),
+            }
+        )
+        controller_client = MappingClient(
+            {
+                "/repos/person/nixpkgs-contribution-workflows/actions/workflows/review.yml": {
+                    "id": 123,
+                    "name": "Review",
+                    "state": "disabled_manually",
+                }
+            }
+        )
+
+        with self.assertRaisesRegex(preflight.PreflightError, "unavailable or inactive"):
+            preflight.run_preflight(
+                pr_client,
+                fork_repository="person/nixpkgs",
+                review_enabled=True,
+                review_client=controller_client,
+                review_repository="person/nixpkgs-contribution-workflows",
+                review_mode="controller",
+            )
 
 
 if __name__ == "__main__":

@@ -210,21 +210,33 @@ items, including `nixpkgs-review`, binary functionality, and policy attestations
 remain unchecked for human review. Missing verification data or an unrecognized
 template layout stops the job before pushing a branch or opening a PR.
 
-## Optional nixpkgs-review-gha
+## Optional nixpkgs review
 
-To dispatch Darwin-only review runs after upstream nixpkgs CI passes:
+Set `NIXPKGS_REVIEW_GHA_ENABLED=true` to start Darwin review only after the
+complete upstream nixpkgs check set has remained passed or skipped for three
+observations. The updater never marks a PR ready, merges it, or invokes the
+merge bot.
 
-1. Fork or configure `OWNER/nixpkgs-review-gha`.
-2. Create a fine-grained token limited to that repository with **Actions: Read
-   and write**, and save it as `NIXPKGS_REVIEW_GHA_TOKEN`.
-3. Set `NIXPKGS_REVIEW_GHA_ENABLED=true`.
-4. If needed, set `NIXPKGS_REVIEW_GHA_REPOSITORY` to another repository.
-5. Run `preflight` again.
+The shared controller is the recommended mode. Set
+`NIXPKGS_REVIEW_DISPATCH_REPOSITORY` to the controller repository, usually
+`OWNER/nixpkgs-contribution-workflows`, and create
+`NIXPKGS_REVIEW_DISPATCH_TOKEN`: a fine-grained token limited to that
+repository with **Actions: Read and write**. The gate sends the pull request
+number, package attribute, `platform-scope=darwin`, and `force=false` to
+`review.yml` on `main`. Its summary links the controller request; the actual
+downstream build is owned and deduplicated by that controller.
 
-The review gate waits up to three hours and requires the complete upstream
-check set to remain passed or skipped for three observations. It dispatches
-only `x86_64-darwin` and `aarch64-darwin`, suppresses duplicate review runs,
-and never marks a PR ready, merges it, or invokes the merge bot.
+Existing direct `nixpkgs-review-gha` operation remains available when
+`NIXPKGS_REVIEW_DISPATCH_REPOSITORY` is unset. It uses
+`NIXPKGS_REVIEW_GHA_TOKEN` with **Actions: Read and write**, and defaults to
+`OWNER/nixpkgs-review-gha` unless `NIXPKGS_REVIEW_GHA_REPOSITORY` is set.
+Direct mode dispatches only `x86_64-darwin` and `aarch64-darwin` and retains
+its existing PR-number duplicate suppression.
+
+Run `preflight` after selecting either mode. In controller mode only the
+controller token is required for review integration; in direct mode only the
+direct runner token is required. The updater validates that the selected
+repository's `review.yml` workflow is active before the full run.
 
 ## Security and recovery
 

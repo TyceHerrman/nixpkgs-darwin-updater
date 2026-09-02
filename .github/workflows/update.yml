@@ -49,7 +49,9 @@ jobs:
           NIXPKGS_PR_TOKEN: ${{ secrets.NIXPKGS_PR_TOKEN }}
           NIXPKGS_REVIEW_GHA_ENABLED: ${{ vars.NIXPKGS_REVIEW_GHA_ENABLED || 'false' }}
           NIXPKGS_REVIEW_GHA_REPOSITORY: ${{ vars.NIXPKGS_REVIEW_GHA_REPOSITORY }}
-          NIXPKGS_REVIEW_GHA_TOKEN: ${{ secrets.NIXPKGS_REVIEW_GHA_TOKEN }}
+          NIXPKGS_REVIEW_GHA_TOKEN: ${{ vars.NIXPKGS_REVIEW_DISPATCH_REPOSITORY == '' && secrets.NIXPKGS_REVIEW_GHA_TOKEN || '' }}
+          NIXPKGS_REVIEW_DISPATCH_REPOSITORY: ${{ vars.NIXPKGS_REVIEW_DISPATCH_REPOSITORY }}
+          NIXPKGS_REVIEW_DISPATCH_TOKEN: ${{ vars.NIXPKGS_REVIEW_DISPATCH_REPOSITORY != '' && secrets.NIXPKGS_REVIEW_DISPATCH_TOKEN || '' }}
         run: >-
           python3 updater/preflight.py
           --github-summary "$GITHUB_STEP_SUMMARY"
@@ -283,10 +285,13 @@ jobs:
         env:
           BRANCH: ${{ matrix.branch }}
           FORK_OWNER: ${{ needs.detect.outputs.fork_owner }}
-          GITHUB_TOKEN: ${{ secrets.NIXPKGS_PR_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          NIXPKGS_REVIEW_DISPATCH_REPOSITORY: ${{ vars.NIXPKGS_REVIEW_DISPATCH_REPOSITORY }}
+          NIXPKGS_REVIEW_DISPATCH_TOKEN: ${{ vars.NIXPKGS_REVIEW_DISPATCH_REPOSITORY != '' && secrets.NIXPKGS_REVIEW_DISPATCH_TOKEN || '' }}
           NIXPKGS_REVIEW_GHA_REPOSITORY: ${{ vars.NIXPKGS_REVIEW_GHA_REPOSITORY || format('{0}/nixpkgs-review-gha', github.repository_owner) }}
-          NIXPKGS_REVIEW_GHA_TOKEN: ${{ secrets.NIXPKGS_REVIEW_GHA_TOKEN }}
+          NIXPKGS_REVIEW_GHA_TOKEN: ${{ vars.NIXPKGS_REVIEW_DISPATCH_REPOSITORY == '' && secrets.NIXPKGS_REVIEW_GHA_TOKEN || '' }}
         run: >-
           python3 updater/review_gate.py
           --head "$FORK_OWNER:$BRANCH"
+          --attribute "${{ matrix.attr }}"
           --github-summary "$GITHUB_STEP_SUMMARY"
