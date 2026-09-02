@@ -168,6 +168,16 @@ The macOS job uses only nixpkgs-native mechanisms:
 There are no Harper-, WhatCable-, or other package-specific verifier scripts.
 Generated pull requests remain drafts and always require manual review.
 
+Each PR body uses `.github/PULL_REQUEST_TEMPLATE.md` from the exact upstream
+nixpkgs commit inspected by the detector—not a copied or abbreviated template.
+The updater adds the version/release and verification details in its description
+area and preserves the template's comments, headings, checklist wording, and
+reference links. It checks `aarch64-darwin` after a successful build, and package
+tests only when derivation-valued `passthru.tests` were actually built. Other
+items, including `nixpkgs-review`, binary functionality, and policy attestations,
+remain unchecked for human review. Missing verification data or an unrecognized
+template layout stops the job before pushing a branch or opening a PR.
+
 ## Optional nixpkgs-review-gha
 
 To dispatch Darwin-only review runs after upstream nixpkgs CI passes:
