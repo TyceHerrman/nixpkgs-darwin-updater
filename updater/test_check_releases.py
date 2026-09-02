@@ -47,6 +47,15 @@ def method_api_key(method, path, **query):
     return (method, *api_key(path, **query))
 
 
+def known_pr_search_key(attr):
+    return api_key(
+        "/search/issues",
+        q=f'repo:NixOS/nixpkgs is:pr is:open in:title "{attr}:"',
+        per_page=100,
+        page=1,
+    )
+
+
 def package_source(version, platform):
     return f"""
       version = "{version}";
@@ -143,6 +152,14 @@ def collection_responses(*, pull_requests=None, search_items=None):
     branch = "auto-update/whatcable-1.4.0"
     title = "whatcable: 1.2.1 -> 1.4.0"
     return {
+        **{
+            known_pr_search_key(package.attr): {
+                "total_count": 0,
+                "incomplete_results": False,
+                "items": [],
+            }
+            for package in PACKAGES
+        },
         api_key("/repos/NixOS/nixpkgs/commits/master"): {"sha": base_sha},
         api_key(
             "/repos/NixOS/nixpkgs/contents/pkgs/by-name/ha/harper-desktop/package.nix",
@@ -197,6 +214,11 @@ def harper_collection_responses(*, assets, issues=()):
         "html_url": f"https://github.com/{updater_repository}/issues/1",
     }
     return {
+        known_pr_search_key("harper-desktop"): {
+            "total_count": 0,
+            "incomplete_results": False,
+            "items": [],
+        },
         api_key("/repos/NixOS/nixpkgs/commits/master"): {"sha": base_sha},
         api_key(
             "/repos/NixOS/nixpkgs/contents/pkgs/by-name/ha/harper-desktop/package.nix",
@@ -218,9 +240,10 @@ def harper_collection_responses(*, assets, issues=()):
             page=2,
         ): [],
         method_api_key("POST", f"/repos/{updater_repository}/issues"): blocked_issue,
-        method_api_key(
-            "POST", f"/repos/{updater_repository}/issues/1/comments"
-        ): {"id": 2},
+        method_api_key("PATCH", f"/repos/{updater_repository}/issues/1"): blocked_issue,
+        method_api_key("POST", f"/repos/{updater_repository}/issues/1/comments"): {
+            "id": 2
+        },
         api_key(
             "/repos/NixOS/nixpkgs/pulls",
             state="open",
@@ -423,7 +446,10 @@ class CollectionTests(unittest.TestCase):
             candidate.release_url,
             "https://github.com/darrylmorley/whatcable/releases/tag/v1.4.0",
         )
-        self.assertIn("harper-desktop: current at 2.8.0", result.notes)
+        self.assertIn(
+            "harper-desktop: packaged at 2.8.0; latest published release is 2.8.0; no newer release found",
+            result.notes,
+        )
 
     def test_suppresses_existing_head_pull_request(self):
         pull_request = {

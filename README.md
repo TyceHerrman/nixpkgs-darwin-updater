@@ -128,7 +128,7 @@ the unit and Nix expression tests; it must pass before merging. Use squash or
 rebase merging. An approving review is not required, but review conversations
 must be resolved. Downstream forks choose their own branch policies.
 
-## Missing release assets
+## Known-release availability and missing assets
 
 When a newer release lacks its configured asset, has an incomplete upload, or
 publishes an empty asset, no macOS update job is created. The detector opens one
@@ -137,9 +137,25 @@ detector rechecks the release assets while reusing that issue, even if it was
 manually closed. It does not create duplicate issues or start a macOS job while
 the asset remains unavailable.
 
+The detector also discovers versions named by its open update PRs and existing
+blocked-release issues. It checks each exact GitHub release before reporting a
+package as having no newer release. This protects against an upstream project
+deleting, drafting, or otherwise making a release unavailable after an update PR
+has already been opened—even when GitHub's `latest` endpoint falls back to an
+older version. A surviving Git tag alone is never treated as an available
+release because it does not provide the release assets.
+
+An unavailable known release is recorded in the same package/version issue,
+including the affected PR when there is one. Closed issues continue to suppress
+duplicate notifications. The detector rechecks on every run, reopens a recovered
+issue if the release disappears again, and does not recreate an existing PR.
+Authentication, rate-limit, network, malformed-response, and GitHub server
+failures fail detection; they are not mislabeled as withdrawn releases.
+
 If the asset later becomes ready for the same version, the workflow comments on
 the blocked-release issue, closes it when still open, and resumes the normal
-Darwin update. This catches assets attached after the initial GitHub release.
+Darwin update. If an update PR already exists, it remains the sole PR. This
+catches releases or assets restored after the initial GitHub release.
 
 When a newer release appears, the workflow comments on and closes the previous
 open issue as superseded and evaluates the new release independently. Failure
@@ -151,14 +167,48 @@ the notification or recovery record.
 The macOS job uses only nixpkgs-native mechanisms:
 
 1. Run the package's declared update script.
-2. Require exactly one clean update commit changing only `package_file` to the
-   detected version.
+2. Require exactly one clean update commit directly on the inspected upstream
+   base, changing only `package_file` from the inspected to the detected version.
+   Validate its subject and add its changelog reference when missing.
 3. Build the package, including its normal check and install-check hooks.
 4. Recursively discover and build every derivation exposed through the
    package's `passthru.tests`.
 
 There are no Harper-, WhatCable-, or other package-specific verifier scripts.
 Generated pull requests remain drafts and always require manual review.
+
+The updater enforces the mechanical parts of the nixpkgs
+[commit conventions](https://github.com/NixOS/nixpkgs/blob/master/pkgs/README.md#commit-conventions):
+the subject must be exactly `attribute: old-version -> new-version` (no trailing
+period), with a blank line before any body. It preserves the update script's
+explanation and existing trailers, adds `Changelog: <upstream release URL>` if
+missing, and checks the commit again after verification and before the push
+step. Preparation changes
+only commit metadata, preserving the package tree, parent, and original author.
+Any mismatch fails before publication; an invalid subject is not silently
+rewritten.
+
+The nixpkgs
+[automation policy](https://github.com/NixOS/nixpkgs/blob/master/CONTRIBUTING.md#automationai-policy)
+exempts maintainer-approved bots that run update scripts. This updater is
+intended for that use: maintainers configure their packages and it runs the
+declared update scripts. It does not use an LLM at runtime and does not add an
+`Assisted-by:` trailer or an AI disclosure to deterministic updates. If you use
+an AI tool to change a package or its commit/PR text manually,
+add the actual tool and model/version to an `Assisted-by:` commit trailer and
+disclose that assistance separately in the PR description. Existing trailers
+are preserved. These checks do not replace human responsibility for correctness,
+licensing, or the other nixpkgs contribution requirements.
+
+Each PR body uses `.github/PULL_REQUEST_TEMPLATE.md` from the exact upstream
+nixpkgs commit inspected by the detector—not a copied or abbreviated template.
+The updater adds the version/release and verification details in its description
+area and preserves the template's comments, headings, checklist wording, and
+reference links. It checks `aarch64-darwin` after a successful build, and package
+tests only when derivation-valued `passthru.tests` were actually built. Other
+items, including `nixpkgs-review`, binary functionality, and policy attestations,
+remain unchecked for human review. Missing verification data or an unrecognized
+template layout stops the job before pushing a branch or opening a PR.
 
 ## Optional nixpkgs-review-gha
 

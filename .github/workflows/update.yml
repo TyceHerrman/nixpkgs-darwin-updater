@@ -148,30 +148,21 @@ jobs:
       - name: Validate the update commit and version
         working-directory: nixpkgs
         env:
+          ATTR: ${{ matrix.attr }}
           BASE_SHA: ${{ needs.detect.outputs.base_sha }}
           NEW_VERSION: ${{ matrix.new_version }}
+          OLD_VERSION: ${{ matrix.old_version }}
           PACKAGE_FILE: ${{ matrix.package_file }}
+          RELEASE_URL: ${{ matrix.release_url }}
         run: |
-          test "$(git rev-list --count "$BASE_SHA..HEAD")" = 1
-          test -z "$(git status --porcelain)"
-          changed_files="$(git diff --name-only "$BASE_SHA" HEAD)"
-          test "$changed_files" = "$PACKAGE_FILE"
-          python3 - "$PACKAGE_FILE" "$NEW_VERSION" <<'PY'
-          import re
-          import sys
-          from pathlib import Path
-
-          package_file, expected = sys.argv[1:]
-          versions = re.findall(
-              r'^\s*version\s*=\s*"([^"]+)"\s*;',
-              Path(package_file).read_text(),
-              re.MULTILINE,
-          )
-          if versions != [expected]:
-              raise SystemExit(
-                  f"expected version {expected!r} in {package_file}, got {versions!r}"
-              )
-          PY
+          python3 "$GITHUB_WORKSPACE/automation/updater/commit_message.py" \
+            --nixpkgs "$GITHUB_WORKSPACE/nixpkgs" \
+            --base-sha "$BASE_SHA" \
+            --attr "$ATTR" \
+            --package-file "$PACKAGE_FILE" \
+            --old-version "$OLD_VERSION" \
+            --new-version "$NEW_VERSION" \
+            --release-url "$RELEASE_URL"
       - name: Build the package and passthru tests
         env:
           ATTR: ${{ matrix.attr }}
@@ -180,6 +171,44 @@ jobs:
           --attr "$ATTR"
           --nixpkgs "$GITHUB_WORKSPACE/nixpkgs"
           --tests-expression "$GITHUB_WORKSPACE/automation/updater/passthru-tests.nix"
+          >"$RUNNER_TEMP/package-verification.json"
+      - name: Prepare the upstream pull request body
+        working-directory: nixpkgs
+        env:
+          ATTR: ${{ matrix.attr }}
+          BASE_SHA: ${{ needs.detect.outputs.base_sha }}
+          NEW_VERSION: ${{ matrix.new_version }}
+          OLD_VERSION: ${{ matrix.old_version }}
+          RELEASE_URL: ${{ matrix.release_url }}
+        run: |
+          python3 "$GITHUB_WORKSPACE/automation/updater/pr_body.py" \
+            --nixpkgs "$GITHUB_WORKSPACE/nixpkgs" \
+            --base-sha "$BASE_SHA" \
+            --attr "$ATTR" \
+            --old-version "$OLD_VERSION" \
+            --new-version "$NEW_VERSION" \
+            --release-url "$RELEASE_URL" \
+            --verification "$RUNNER_TEMP/package-verification.json" \
+            --output "$RUNNER_TEMP/updater-pr-body.md"
+      - name: Recheck the commit before publication
+        working-directory: nixpkgs
+        env:
+          ATTR: ${{ matrix.attr }}
+          BASE_SHA: ${{ needs.detect.outputs.base_sha }}
+          NEW_VERSION: ${{ matrix.new_version }}
+          OLD_VERSION: ${{ matrix.old_version }}
+          PACKAGE_FILE: ${{ matrix.package_file }}
+          RELEASE_URL: ${{ matrix.release_url }}
+        run: |
+          python3 "$GITHUB_WORKSPACE/automation/updater/commit_message.py" \
+            --check \
+            --nixpkgs "$GITHUB_WORKSPACE/nixpkgs" \
+            --base-sha "$BASE_SHA" \
+            --attr "$ATTR" \
+            --package-file "$PACKAGE_FILE" \
+            --old-version "$OLD_VERSION" \
+            --new-version "$NEW_VERSION" \
+            --release-url "$RELEASE_URL"
       - name: Push the validated automation branch
         working-directory: nixpkgs
         env:
@@ -205,34 +234,17 @@ jobs:
       - name: Open an upstream draft pull request
         working-directory: nixpkgs
         env:
-          ATTR: ${{ matrix.attr }}
-          BASE_SHA: ${{ needs.detect.outputs.base_sha }}
           BRANCH: ${{ matrix.branch }}
           FORK_OWNER: ${{ needs.detect.outputs.fork_owner }}
           GH_TOKEN: ${{ secrets.NIXPKGS_PR_TOKEN }}
-          NEW_VERSION: ${{ matrix.new_version }}
-          OLD_VERSION: ${{ matrix.old_version }}
-          RELEASE_URL: ${{ matrix.release_url }}
           TITLE: ${{ matrix.title }}
         run: |
-          body="$(printf '%s\n' \
-            "## Package update" \
-            "" \
-            "- Version: \`$OLD_VERSION\` -> \`$NEW_VERSION\`" \
-            "- Upstream release: $RELEASE_URL" \
-            "- Nixpkgs base: \`$BASE_SHA\`" \
-            "" \
-            "## Verification" \
-            "" \
-            "- Ran the package's declared nixpkgs update script" \
-            "- Built \`$ATTR\` on \`aarch64-darwin\`, including its normal hooks" \
-            "- Built every derivation exposed through \`$ATTR.passthru.tests\`")"
           gh pr create \
             --repo NixOS/nixpkgs \
             --base master \
             --head "$FORK_OWNER:$BRANCH" \
             --title "$TITLE" \
-            --body "$body" \
+            --body-file "$RUNNER_TEMP/updater-pr-body.md" \
             --draft
       - name: Record the update result
         if: always()

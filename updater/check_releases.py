@@ -6,6 +6,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from functools import cmp_to_key
 from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -23,7 +24,9 @@ MANIFEST_FIELDS = {
 
 
 class GitHubApiError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,15 @@ class BlockedReleaseIssue:
     version: str
     state: str
     url: str
+    body: str
+    availability: str
+
+
+@dataclass(frozen=True)
+class KnownRelease:
+    version: str
+    tag: str | None
+    pr_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,8 +129,12 @@ class GitHubClient:
         try:
             with self.opener(request) as response:
                 return json.load(response)
+        except HTTPError as error:
+            error.close()
+            raise GitHubApiError(
+                f"GitHub API request failed for {path}: {error}", status=error.code
+            ) from error
         except (
-            HTTPError,
             URLError,
             OSError,
             UnicodeDecodeError,
@@ -167,6 +183,9 @@ class GitHubClient:
 
     def close_issue(self, repository: str, number: int):
         self.patch_json(f"/repos/{repository}/issues/{number}", {"state": "closed"})
+
+    def update_issue(self, repository: str, number: int, **fields):
+        self.patch_json(f"/repos/{repository}/issues/{number}", fields)
 
     def get_text_content(self, repository: str, path: str, *, ref: str) -> str:
         payload = self.get_json(
@@ -334,8 +353,48 @@ def _blocked_release_issues(client, repository: str, attr: str):
             or not url
         ):
             raise GitHubApiError("invalid blocked-release issue response")
-        issues.append(BlockedReleaseIssue(number, match.group(1), state, url))
+        status = re.search(
+            r"<!-- nixpkgs-darwin-updater:availability:(unavailable|available|superseded) -->",
+            body,
+        )
+        issues.append(
+            BlockedReleaseIssue(
+                number,
+                match.group(1),
+                state,
+                url,
+                body,
+                status.group(1) if status else "unavailable",
+            )
+        )
     return tuple(issues)
+
+
+def _issue_status_body(body: str, status: str) -> str:
+    body = re.sub(r"\n?<!-- nixpkgs-darwin-updater:availability:[a-z]+ -->", "", body)
+    return f"{body}\n<!-- nixpkgs-darwin-updater:availability:{status} -->"
+
+
+def _supersede_issues(client, repository, issues, version, release_url, protected=()):
+    for issue in issues:
+        if (
+            issue.state == "open"
+            and compare_versions(version, issue.version) > 0
+            and not any(
+                compare_versions(issue.version, other) == 0 for other in protected
+            )
+        ):
+            client.comment_issue(
+                repository,
+                issue.number,
+                f"Superseded by release {version}: {release_url}",
+            )
+            client.update_issue(
+                repository,
+                issue.number,
+                state="closed",
+                body=_issue_status_body(issue.body, "superseded"),
+            )
 
 
 def gate_release_asset(
@@ -346,71 +405,105 @@ def gate_release_asset(
     version: str,
     release_url: str,
     assets: tuple[ReleaseAsset, ...],
+    release_available: bool = True,
+    pr_url: str | None = None,
+    issues: tuple[BlockedReleaseIssue, ...] | None = None,
+    supersede: bool = True,
 ) -> AssetGate:
-    issues = _blocked_release_issues(client, repository, package.attr)
-    for issue in issues:
-        if issue.state == "open" and compare_versions(version, issue.version) > 0:
-            client.comment_issue(
-                repository,
-                issue.number,
-                f"Superseded by release {version}: {release_url}",
-            )
-            client.close_issue(repository, issue.number)
+    if issues is None:
+        issues = _blocked_release_issues(client, repository, package.attr)
+    if supersede:
+        _supersede_issues(client, repository, issues, version, release_url)
 
     matching_issue = next(
         (issue for issue in issues if compare_versions(version, issue.version) == 0),
         None,
     )
-    if package.required_asset is None:
-        return AssetGate(True, None)
-
-    required_asset = render_required_asset(package.required_asset, version)
-    asset_is_ready = any(
+    required_asset = (
+        render_required_asset(package.required_asset, version)
+        if package.required_asset is not None
+        else None
+    )
+    asset_is_ready = required_asset is None or any(
         asset.name == required_asset and asset.state == "uploaded" and asset.size > 0
         for asset in assets
     )
-    if asset_is_ready:
-        if matching_issue is not None:
+    if release_available and asset_is_ready:
+        if matching_issue is not None and matching_issue.availability != "available":
             client.comment_issue(
                 repository,
                 matching_issue.number,
                 f"Required release asset is now available for {version}: {release_url}",
             )
-            if matching_issue.state == "open":
-                client.close_issue(repository, matching_issue.number)
+            client.update_issue(
+                repository,
+                matching_issue.number,
+                state="closed",
+                body=_issue_status_body(matching_issue.body, "available"),
+            )
         return AssetGate(True, None)
 
+    reason = (
+        f"missing asset {required_asset}"
+        if release_available
+        else "release unavailable through the GitHub release API"
+    )
     if matching_issue is not None:
+        body = matching_issue.body
+        if pr_url and pr_url not in body:
+            body += f"\n- Affected pull request: {pr_url}"
+        if matching_issue.availability != "unavailable" or body != matching_issue.body:
+            fields = {"body": _issue_status_body(body, "unavailable")}
+            if matching_issue.availability != "unavailable":
+                fields["state"] = "open"
+                client.comment_issue(
+                    repository,
+                    matching_issue.number,
+                    f"Release {version} is unavailable again: {reason}. {release_url}",
+                )
+            client.update_issue(repository, matching_issue.number, **fields)
         return AssetGate(
             False,
-            f"{package.attr}: {version} suppressed by blocked-release issue "
-            f"{matching_issue.url}",
+            f"{package.attr}: {version} unavailable ({reason}); "
+            f"blocked-release issue {matching_issue.url}",
         )
 
-    title = f"{package.attr} {version}: required release asset is unavailable"
+    title = f"{package.attr} {version}: release or required asset is unavailable"
     body = "\n".join(
         (
             blocked_release_marker(package.attr, version),
             "",
-            f"The upstream release does not contain a ready `{required_asset}` asset.",
+            (
+                f"The upstream release does not contain a ready `{required_asset}` asset."
+                if release_available
+                else "The known release is not available as a stable published release through "
+                "the GitHub API. It may have been deleted, made draft/prerelease, or become "
+                "inaccessible; this check cannot determine the cause. A surviving Git tag "
+                "does not establish that its release assets are available."
+            ),
             "",
             f"- Upstream release: {release_url}",
-            f"- Expected asset: `{required_asset}`",
+            f"- Expected asset: `{required_asset}`"
+            if required_asset
+            else "- No asset rule configured.",
+            f"- Affected pull request: {pr_url}" if pr_url else "",
             "",
             (
                 "The updater will recheck this release on each scheduled run and "
-                "resume the update when the asset is ready."
+                "resume normal detection when the release and required asset are ready. "
+                "An existing PR will not be recreated."
             ),
         )
     )
-    issue = client.create_issue(repository, title=title, body=body)
+    issue = client.create_issue(
+        repository, title=title, body=_issue_status_body(body, "unavailable")
+    )
     issue_url = issue.get("html_url") if isinstance(issue, dict) else None
     if not isinstance(issue_url, str) or not issue_url:
         raise GitHubApiError("created blocked-release issue has no URL")
     return AssetGate(
         False,
-        f"{package.attr}: {version} blocked by missing asset {required_asset}; "
-        f"opened {issue_url}",
+        f"{package.attr}: {version} blocked by {reason}; opened {issue_url}",
     )
 
 
@@ -508,13 +601,129 @@ def _existing_pr_url(
     return None
 
 
+def _release_tag_in_text(text, package: Package, version: str) -> str | None:
+    if not isinstance(text, str):
+        return None
+    # Only numeric release URLs for this manifest's upstream are data sources.
+    pattern = (
+        rf"https://github\.com/{re.escape(package.upstream)}/releases/tag/"
+        r"(v?[0-9]+(?:\.[0-9]+)*)(?=$|[\s)>\]`])"
+    )
+    for tag in re.findall(pattern, text):
+        if compare_versions(normalize_version(tag), version) == 0:
+            return tag
+    return None
+
+
+def _known_pr_releases(client, package: Package, fork_repository: str):
+    known = []
+    page = 1
+    seen = set()
+    while True:
+        search = client.get_json(
+            "/search/issues",
+            query={
+                "q": f'repo:NixOS/nixpkgs is:pr is:open in:title "{package.attr}:"',
+                "per_page": 100,
+                "page": page,
+            },
+        )
+        if (
+            not isinstance(search, dict)
+            or not isinstance(search.get("items"), list)
+            or search.get("incomplete_results") is not False
+            or type(search.get("total_count")) is not int
+            or not 0 <= search["total_count"] <= 1000
+        ):
+            raise GitHubApiError("invalid or incomplete known-release PR search")
+        for item in search["items"]:
+            number = item.get("number") if isinstance(item, dict) else None
+            if type(number) is not int or number <= 0 or number in seen:
+                raise GitHubApiError("invalid or repeated known-release PR search item")
+            seen.add(number)
+            pull = client.get_json(f"/repos/NixOS/nixpkgs/pulls/{number}")
+            if not isinstance(pull, dict):
+                raise GitHubApiError("invalid known-release PR response")
+            head, base = pull.get("head"), pull.get("base")
+            if not isinstance(head, dict) or not isinstance(base, dict):
+                raise GitHubApiError("invalid known-release PR refs")
+            head_repo = head.get("repo") or {}  # A deleted fork has a null repo.
+            base_repo = base.get("repo") or {}
+            if not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
+                raise GitHubApiError("invalid known-release PR repositories")
+            if (
+                pull.get("state") != "open"
+                or str(head_repo.get("full_name", "")).lower()
+                != fork_repository.lower()
+                or base_repo.get("full_name") != "NixOS/nixpkgs"
+                or base.get("ref") != "master"
+            ):
+                continue
+            match = re.fullmatch(
+                rf"auto-update/{re.escape(package.attr)}-([0-9]+(?:\.[0-9]+)*)",
+                head.get("ref", ""),
+            )
+            if match is None:
+                continue
+            version = normalize_version(match.group(1))
+            known.append(
+                KnownRelease(
+                    version,
+                    _release_tag_in_text(pull.get("body"), package, version),
+                    f"https://github.com/NixOS/nixpkgs/pull/{number}",
+                )
+            )
+        if len(seen) >= search["total_count"]:
+            return tuple(known)
+        if not search["items"] or page >= 10:
+            raise GitHubApiError("incomplete known-release PR search pagination")
+        page += 1
+
+
+def _optional_release(client, path):
+    try:
+        return client.get_json(path)
+    except GitHubApiError as error:
+        if error.status == 404:
+            return None
+        raise
+
+
+def _get_known_release(client, package: Package, known: KnownRelease):
+    # Older notification/PR bodies may not record the tag's optional v prefix.
+    tags = (known.tag,) if known.tag else (f"v{known.version}", known.version)
+    for tag in tags:
+        payload = _optional_release(
+            client, f"/repos/{package.upstream}/releases/tags/{tag}"
+        )
+        if payload is None:
+            continue
+        if not isinstance(payload, dict) or any(
+            type(payload.get(field)) is not bool for field in ("draft", "prerelease")
+        ):
+            raise GitHubApiError("invalid known-release publication state")
+        if payload["draft"] or payload["prerelease"]:
+            return None
+        release = _require_latest_release(payload, package.upstream)
+        if compare_versions(release[0], known.version) != 0:
+            raise GitHubApiError(
+                "known-release version does not match requested version"
+            )
+        return release
+    return None
+
+
 def collect_updates(
     packages: tuple[Package, ...] | list[Package],
     client: GitHubClient,
     *,
     fork_owner: str,
     updater_repository: str,
+    fork_repository: str | None = None,
 ) -> Collection:
+    fork_repository = validate_repository_name(
+        fork_repository or f"{fork_owner}/nixpkgs"
+    )
     base_sha = _require_base_sha(client.get_json("/repos/NixOS/nixpkgs/commits/master"))
     candidates: list[Candidate] = []
     notes: list[str] = []
@@ -525,50 +734,120 @@ def collect_updates(
         )
         validate_package_source(package, source)
         old_version = extract_package_version(source)
-        new_version, release_url, release_assets = _require_latest_release(
-            client.get_json(f"/repos/{package.upstream}/releases/latest"),
-            package.upstream,
+        issues = _blocked_release_issues(client, updater_repository, package.attr)
+        pull_releases = _known_pr_releases(client, package, fork_repository)
+        latest_payload = _optional_release(
+            client, f"/repos/{package.upstream}/releases/latest"
         )
-        if compare_versions(new_version, old_version) <= 0:
-            notes.append(f"{package.attr}: current at {old_version}")
+        latest = (
+            _require_latest_release(latest_payload, package.upstream)
+            if latest_payload is not None
+            else None
+        )
+        known = list(pull_releases)
+        for issue in issues:
+            if (
+                issue.availability != "superseded"
+                and compare_versions(issue.version, old_version) > 0
+                and (latest is None or compare_versions(issue.version, latest[0]) >= 0)
+                and not any(
+                    compare_versions(issue.version, item.version) == 0 for item in known
+                )
+            ):
+                known.append(
+                    KnownRelease(
+                        issue.version,
+                        _release_tag_in_text(issue.body, package, issue.version),
+                    )
+                )
+        if latest is not None:
+            _supersede_issues(
+                client,
+                updater_repository,
+                issues,
+                latest[0],
+                latest[1],
+                protected=tuple(item.version for item in pull_releases),
+            )
+            if compare_versions(latest[0], old_version) > 0 and not any(
+                compare_versions(latest[0], item.version) == 0 for item in known
+            ):
+                known.append(KnownRelease(latest[0], latest_payload["tag_name"]))
+
+        if not known:
+            latest_description = (
+                f"latest published release is {latest[0]}"
+                if latest
+                else "no published release is available"
+            )
+            notes.append(
+                f"{package.attr}: packaged at {old_version}; {latest_description}; no newer release found"
+            )
             continue
 
-        asset_gate = gate_release_asset(
-            client,
-            repository=updater_repository,
-            package=package,
-            version=new_version,
-            release_url=release_url,
-            assets=release_assets,
+        known.sort(
+            key=cmp_to_key(
+                lambda left, right: compare_versions(left.version, right.version)
+            )
         )
-        if not asset_gate.actionable:
-            if asset_gate.note is not None:
-                notes.append(asset_gate.note)
-            continue
-
-        branch = f"auto-update/{package.attr}-{new_version}"
-        title = f"{package.attr}: {old_version} -> {new_version}"
-        existing_url = _existing_pr_url(
-            client,
-            fork_owner=fork_owner,
-            branch=branch,
-            title=title,
-        )
-        if existing_url is not None:
-            notes.append(f"{package.attr}: existing pull request {existing_url}")
-            continue
-
-        candidates.append(
-            Candidate(
-                attr=package.attr,
-                package_file=package.package_file,
-                old_version=old_version,
-                new_version=new_version,
+        for item in known:
+            # Reuse latest's payload only for that exact numeric version.
+            release = (
+                latest
+                if latest and compare_versions(latest[0], item.version) == 0
+                else _get_known_release(client, package, item)
+            )
+            release_url = (
+                release[1]
+                if release
+                else f"https://github.com/{package.upstream}/releases/tag/{item.tag or 'v' + item.version}"
+            )
+            asset_gate = gate_release_asset(
+                client,
+                repository=updater_repository,
+                package=package,
+                version=item.version,
                 release_url=release_url,
+                assets=release[2] if release else (),
+                release_available=release is not None,
+                pr_url=item.pr_url,
+                issues=issues,
+                supersede=False,
+            )
+            if not asset_gate.actionable:
+                notes.append(asset_gate.note)
+                continue
+            if item.pr_url:
+                notes.append(
+                    f"{package.attr}: known release {item.version} is available; existing pull request {item.pr_url}"
+                )
+                continue
+            # Never emit parallel version updates, or fall back below a known version.
+            if item != known[-1] or compare_versions(item.version, old_version) <= 0:
+                continue
+            branch = f"auto-update/{package.attr}-{item.version}"
+            title = f"{package.attr}: {old_version} -> {item.version}"
+            existing_url = _existing_pr_url(
+                client,
+                fork_owner=fork_owner,
                 branch=branch,
                 title=title,
             )
-        )
+            if existing_url is not None:
+                notes.append(f"{package.attr}: existing pull request {existing_url}")
+                continue
+
+            candidates.append(
+                Candidate(
+                    attr=package.attr,
+                    package_file=package.package_file,
+                    old_version=old_version,
+                    new_version=item.version,
+                    release_url=release_url,
+                    branch=branch,
+                    title=title,
+                )
+            )
 
     return Collection(base_sha, tuple(candidates), tuple(notes))
 
@@ -660,6 +939,7 @@ def main(argv: list[str] | None = None) -> int:
         packages,
         client,
         fork_owner=repositories.fork_owner,
+        fork_repository=repositories.fork_repository,
         updater_repository=repositories.updater_repository,
     )
     if args.github_output is not None:
