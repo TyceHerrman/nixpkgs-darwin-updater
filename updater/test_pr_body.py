@@ -140,9 +140,15 @@ Path(os.environ["PR_CAPTURE"]).write_text(json.dumps({"body": body, "args": args
                 "  - [x] [Package tests] at `passthru.tests`.",
                 "  - [ ] [Package tests] at `passthru.tests`.",
             )
+        for item in (
+            "- [ ] Fits [CONTRIBUTING.md], [pkgs/README.md], [maintainers/README.md] and other READMEs.",
+            "- [ ] Follows the [automation/AI policy].",
+        ):
+            self.assertIn(item.replace("[ ]", "[x]", 1), actual_template)
+            restored = restored.replace(item.replace("[ ]", "[x]", 1), item)
         self.assertEqual(restored, template)
         self.assertIn("  - [x] aarch64-darwin", actual_template)
-        self.assertEqual(actual_template.count("[x]"), 2 if tests_built else 1)
+        self.assertEqual(actual_template.count("[x]"), 4 if tests_built else 3)
 
     def test_published_body_preserves_exact_upstream_template(self):
         result = self.run_publication_steps()
@@ -150,6 +156,9 @@ Path(os.environ["PR_CAPTURE"]).write_text(json.dumps({"body": body, "args": args
         created = json.loads(self.capture.read_text())
         self.assert_template_preserved(created["body"])
         self.assertIn("--draft", created["args"])
+        self.assertIn("nix-build --no-out-link -A example-app", created["body"])
+        self.assertNotIn("including its normal check", created["body"])
+        self.assertIn("- [ ] Ran `nixpkgs-review`", created["body"])
 
     def test_package_tests_checked_only_when_derivations_were_built(self):
         self.verification.write_text(

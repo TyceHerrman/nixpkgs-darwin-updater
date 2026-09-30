@@ -205,9 +205,12 @@ nixpkgs commit inspected by the detector—not a copied or abbreviated template.
 The updater adds the version/release and verification details in its description
 area and preserves the template's comments, headings, checklist wording, and
 reference links. It checks `aarch64-darwin` after a successful build, and package
-tests only when derivation-valued `passthru.tests` were actually built. Other
-items, including `nixpkgs-review`, binary functionality, and policy attestations,
-remain unchecked for human review. Missing verification data or an unrecognized
+tests only when derivation-valued `passthru.tests` were actually built. It also
+checks the contribution-guidelines and automation/AI-policy items as the
+maintainer's attestations, not as an automated compliance audit. The
+`nixpkgs-review` item remains unchecked pending upstream support for updating it
+after review ([upstream issue #171](https://github.com/Defelo/nixpkgs-review-gha/issues/171)).
+Binary functionality and other test items remain unchecked. Missing verification data or an unrecognized
 template layout stops the job before pushing a branch or opening a PR.
 
 ## Optional nixpkgs review
