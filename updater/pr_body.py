@@ -11,6 +11,10 @@ from check_releases import normalize_version
 
 TEMPLATE_PATH = ".github/PULL_REQUEST_TEMPLATE.md"
 DARWIN_ITEM = "  - [ ] aarch64-darwin"
+POLICY_ITEMS = (
+    "- [ ] Fits [CONTRIBUTING.md], [pkgs/README.md], [maintainers/README.md] and other READMEs.",
+    "- [ ] Follows the [automation/AI policy].",
+)
 PACKAGE_TESTS_ITEM = "  - [ ] [Package tests] at `passthru.tests`."
 
 
@@ -66,12 +70,12 @@ def render_body(
 
     lines = template.splitlines(keepends=True)
     contents = template.splitlines()
-    for required in ("## Things done", DARWIN_ITEM, PACKAGE_TESTS_ITEM):
+    for required in ("## Things done", DARWIN_ITEM, PACKAGE_TESTS_ITEM, *POLICY_ITEMS):
         if contents.count(required) != 1:
             raise ValueError(
                 f"unrecognized nixpkgs PR template: expected one {required!r}"
             )
-    checked = {DARWIN_ITEM}
+    checked = {DARWIN_ITEM, *POLICY_ITEMS}
     if tests_built:
         checked.add(PACKAGE_TESTS_ITEM)
     filled_template = "".join(
@@ -90,8 +94,8 @@ def render_body(
             f"Upstream release: {release_url}",
             "",
             (
-                "Ran the package's declared nixpkgs update script and built the updated "
-                "package on `aarch64-darwin`, including its normal check and install-check hooks."
+                "Ran the package's declared nixpkgs update script and successfully ran "
+                "`nix-build --no-out-link -A " + attr + "` on `aarch64-darwin`."
             ),
             tests_note,
             "",
